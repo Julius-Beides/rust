@@ -16,6 +16,7 @@ mod unescape_error_reporting;
 mod unicode_chars;
 
 use unescape_error_reporting::{emit_unescape_error, push_escaped_char};
+use rustc_lexer::unescape::Mode;
 
 #[derive(Clone, Debug)]
 pub struct UnmatchedBrace {
@@ -234,7 +235,8 @@ impl<'a> StringReader<'a> {
             }
             rustc_lexer::TokenKind::Literal { kind, suffix_start } => {
                 let suffix_start = start + BytePos(suffix_start as u32);
-                let (kind, symbol) = self.cook_lexer_literal(start, suffix_start, kind);
+                let span = self.mk_sp(start, self.pos);
+                let (kind, symbol) = self.cook_lexer_literal(kind, start, suffix_start, span);
                 let suffix = if suffix_start < self.pos {
                     let string = self.str_from(suffix_start);
                     if string == "_" {
@@ -322,10 +324,13 @@ impl<'a> StringReader<'a> {
 
     fn cook_lexer_literal(
         &self,
+        kind: rustc_lexer::LiteralKind,
         start: BytePos,
         suffix_start: BytePos,
-        kind: rustc_lexer::LiteralKind,
+        span: Span,
     ) -> (token::LitKind, Symbol) {
+        // prefix is `"` or `br"` or `r###"`, ...
+        // TODO cleanup: let (token::LitKind, prefix_len, postfix_len) = match kind {
         match kind {
             rustc_lexer::LiteralKind::Char { terminated } => {
                 if !terminated {
@@ -333,7 +338,8 @@ impl<'a> StringReader<'a> {
                 }
                 let content_start = start + BytePos(1);
                 let content_end = suffix_start - BytePos(1);
-                self.validate_char_escape(content_start, content_end);
+                let lit = self.str_from_to(content_start, content_end);
+                self.validate_literal_escape(Mode::Char, lit, span);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::Char, id)
             }
@@ -344,7 +350,8 @@ impl<'a> StringReader<'a> {
                 }
                 let content_start = start + BytePos(2);
                 let content_end = suffix_start - BytePos(1);
-                self.validate_byte_escape(content_start, content_end);
+                let lit = self.str_from_to(content_start, content_end);
+                self.validate_literal_escape(Mode::Byte, lit, span);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::Byte, id)
             }
@@ -355,7 +362,8 @@ impl<'a> StringReader<'a> {
                 }
                 let content_start = start + BytePos(1);
                 let content_end = suffix_start - BytePos(1);
-                self.validate_str_escape(content_start, content_end);
+                let lit = self.str_from_to(content_start, content_end);
+                self.validate_literal_escape(Mode::Char, lit, span);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::Str, id)
             }
@@ -370,7 +378,8 @@ impl<'a> StringReader<'a> {
                 }
                 let content_start = start + BytePos(2);
                 let content_end = suffix_start - BytePos(1);
-                self.validate_byte_str_escape(content_start, content_end);
+                let lit = self.str_from_to(content_start, content_end);
+                self.validate_literal_escape(Mode::ByteStr, lit, span);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::ByteStr, id)
             }
@@ -381,7 +390,9 @@ impl<'a> StringReader<'a> {
 
                 let content_start = start + BytePos(2 + n);
                 let content_end = suffix_start - BytePos(1 + n);
-                self.validate_raw_str_escape(content_start, content_end);
+                let lit = self.str_from_to(content_start, content_end);
+                // TODO this did report a to short span previously
+                self.validate_literal_escape(Mode::Str, lit, span);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::StrRaw(n_hashes), id)
             }
@@ -392,7 +403,9 @@ impl<'a> StringReader<'a> {
 
                 let content_start = start + BytePos(3 + n);
                 let content_end = suffix_start - BytePos(1 + n);
-                self.validate_raw_byte_str_escape(content_start, content_end);
+                let lit = self.str_from_to(content_start, content_end);
+                // TODO this did report a to short span previously
+                self.validate_literal_escape(Mode::ByteStr, lit, span);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::ByteStrRaw(n_hashes), id)
             }
@@ -554,97 +567,26 @@ impl<'a> StringReader<'a> {
         )
         .raise();
     }
-
-    fn validate_char_escape(&self, content_start: BytePos, content_end: BytePos) {
-        let lit = self.str_from_to(content_start, content_end);
-        if let Err((off, err)) = unescape::unescape_char(lit) {
+    
+    
+    
+    
+    
+    
+    
+    
+    fn validate_literal_escape(&self, mode: Mode, lit_content: &str, span_with_quotes: Span) {
+        unescape::unescape(lit_content, mode, &mut |range, err| {
+            // Called for every escape error in a literal.
             emit_unescape_error(
                 &self.sess.span_diagnostic,
-                lit,
-                self.mk_sp(content_start - BytePos(1), content_end + BytePos(1)),
-                unescape::Mode::Char,
-                0..off,
+                lit_content,
+                span_with_quotes,
+                mode,
+                range,
                 err,
             )
-        }
-    }
-
-    fn validate_byte_escape(&self, content_start: BytePos, content_end: BytePos) {
-        let lit = self.str_from_to(content_start, content_end);
-        if let Err((off, err)) = unescape::unescape_byte(lit) {
-            emit_unescape_error(
-                &self.sess.span_diagnostic,
-                lit,
-                self.mk_sp(content_start - BytePos(1), content_end + BytePos(1)),
-                unescape::Mode::Byte,
-                0..off,
-                err,
-            )
-        }
-    }
-
-    fn validate_str_escape(&self, content_start: BytePos, content_end: BytePos) {
-        let lit = self.str_from_to(content_start, content_end);
-        unescape::unescape_str(lit, &mut |range, c| {
-            if let Err(err) = c {
-                emit_unescape_error(
-                    &self.sess.span_diagnostic,
-                    lit,
-                    self.mk_sp(content_start - BytePos(1), content_end + BytePos(1)),
-                    unescape::Mode::Str,
-                    range,
-                    err,
-                )
-            }
-        })
-    }
-
-    fn validate_raw_str_escape(&self, content_start: BytePos, content_end: BytePos) {
-        let lit = self.str_from_to(content_start, content_end);
-        unescape::unescape_raw_str(lit, &mut |range, c| {
-            if let Err(err) = c {
-                emit_unescape_error(
-                    &self.sess.span_diagnostic,
-                    lit,
-                    self.mk_sp(content_start - BytePos(1), content_end + BytePos(1)),
-                    unescape::Mode::Str,
-                    range,
-                    err,
-                )
-            }
-        })
-    }
-
-    fn validate_raw_byte_str_escape(&self, content_start: BytePos, content_end: BytePos) {
-        let lit = self.str_from_to(content_start, content_end);
-        unescape::unescape_raw_byte_str(lit, &mut |range, c| {
-            if let Err(err) = c {
-                emit_unescape_error(
-                    &self.sess.span_diagnostic,
-                    lit,
-                    self.mk_sp(content_start - BytePos(1), content_end + BytePos(1)),
-                    unescape::Mode::ByteStr,
-                    range,
-                    err,
-                )
-            }
-        })
-    }
-
-    fn validate_byte_str_escape(&self, content_start: BytePos, content_end: BytePos) {
-        let lit = self.str_from_to(content_start, content_end);
-        unescape::unescape_byte_str(lit, &mut |range, c| {
-            if let Err(err) = c {
-                emit_unescape_error(
-                    &self.sess.span_diagnostic,
-                    lit,
-                    self.mk_sp(content_start - BytePos(1), content_end + BytePos(1)),
-                    unescape::Mode::ByteStr,
-                    range,
-                    err,
-                )
-            }
-        })
+        });
     }
 
     fn validate_int_literal(&self, base: Base, content_start: BytePos, content_end: BytePos) {

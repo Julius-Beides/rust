@@ -80,6 +80,7 @@ pub fn unescape_byte(literal_text: &str) -> Result<u8, (usize, EscapeError)> {
 /// Values are returned through invoking of the provided callback.
 pub fn unescape_str<F>(literal_text: &str, callback: &mut F)
 where
+    // Nobody uses the Ok(char) part
     F: FnMut(Range<usize>, Result<char, EscapeError>),
 {
     unescape_str_or_byte_str(literal_text, Mode::Str, callback)
@@ -90,6 +91,7 @@ where
 /// Values are returned through invoking of the provided callback.
 pub fn unescape_byte_str<F>(literal_text: &str, callback: &mut F)
 where
+    // Nobody uses the Ok(u8) part
     F: FnMut(Range<usize>, Result<u8, EscapeError>),
 {
     unescape_str_or_byte_str(literal_text, Mode::ByteStr, &mut |range, char| {
@@ -149,6 +151,44 @@ impl Mode {
             Mode::Byte | Mode::ByteStr => true,
             Mode::Char | Mode::Str => false,
         }
+    }
+}
+
+/// Unify all the unescape methods.
+pub fn unescape<F>(literal_text: &str, mode: Mode, on_escape_error: &mut F)
+where
+    F: FnMut(Range<usize>, EscapeError)
+{
+    let mut chars = literal_text.chars();
+    //TODO unify even more
+    match mode {
+        Mode::Char => if let Err((range, err)) =
+                unescape_char_or_byte(&mut chars, Mode::Char)
+                .map_err(|err| (literal_text.len() - chars.as_str().len(), err)) {
+            on_escape_error(0..range, err);
+        }
+        Mode::Str => {
+            unescape_str_or_byte_str(literal_text, Mode::Str, &mut |range, char| {
+                if let Err(err) = char {
+                    on_escape_error(range, err);
+                }
+            })
+        },
+        Mode::Byte => {
+            let res = unescape_char_or_byte(&mut chars, Mode::Byte)
+                .map(byte_from_char)
+                .map_err(|err| (literal_text.len() - chars.as_str().len(), err));
+            if let Err((range, err)) = res {
+                on_escape_error(0..range, err);
+            }
+        },
+        Mode::ByteStr => {
+            unescape_str_or_byte_str(literal_text, Mode::ByteStr, &mut |range, char| {
+                if let Err(err) = char {
+                    on_escape_error(range, err);
+                }
+            })
+        },
     }
 }
 
@@ -345,7 +385,7 @@ where
 
 fn byte_from_char(c: char) -> u8 {
     let res = c as u32;
-    assert!(res <= u8::max_value() as u32, "guaranteed because of Mode::Byte(Str)");
+    assert!(res <= u8::max_value() as u32, "guaranteed because of Mode::ByteStr");
     res as u8
 }
 
