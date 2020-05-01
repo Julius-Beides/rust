@@ -363,7 +363,7 @@ impl<'a> StringReader<'a> {
                 let content_start = start + BytePos(1);
                 let content_end = suffix_start - BytePos(1);
                 let lit = self.str_from_to(content_start, content_end);
-                self.validate_literal_escape(Mode::Char, lit, span);
+                self.validate_literal_escape(Mode::Str, lit, span);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::Str, id)
             }
@@ -392,7 +392,7 @@ impl<'a> StringReader<'a> {
                 let content_end = suffix_start - BytePos(1 + n);
                 let lit = self.str_from_to(content_start, content_end);
                 // TODO this did report a to short span previously
-                self.validate_literal_escape(Mode::Str, lit, span);
+                self.validate_literal_escape(Mode::RawStr, lit, span);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::StrRaw(n_hashes), id)
             }
@@ -405,7 +405,7 @@ impl<'a> StringReader<'a> {
                 let content_end = suffix_start - BytePos(1 + n);
                 let lit = self.str_from_to(content_start, content_end);
                 // TODO this did report a to short span previously
-                self.validate_literal_escape(Mode::ByteStr, lit, span);
+                self.validate_literal_escape(Mode::RawByteStr, lit, span);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::ByteStrRaw(n_hashes), id)
             }

@@ -132,13 +132,15 @@ pub enum Mode {
     Str,
     Byte,
     ByteStr,
+    RawStr,
+    RawByteStr,
 }
 
 impl Mode {
     pub fn in_single_quotes(self) -> bool {
         match self {
             Mode::Char | Mode::Byte => true,
-            Mode::Str | Mode::ByteStr => false,
+            Mode::Str | Mode::ByteStr | Mode::RawStr | Mode::RawByteStr => false,
         }
     }
 
@@ -148,8 +150,8 @@ impl Mode {
 
     pub fn is_bytes(self) -> bool {
         match self {
-            Mode::Byte | Mode::ByteStr => true,
-            Mode::Char | Mode::Str => false,
+            Mode::Byte | Mode::ByteStr | Mode::RawByteStr => true,
+            Mode::Char | Mode::Str | Mode::RawStr => false,
         }
     }
 }
@@ -189,6 +191,20 @@ where
                 }
             })
         },
+        Mode::RawStr => {
+            unescape_raw_str_or_byte_str(literal_text, Mode::RawStr, &mut |range, char| {
+                if let Err(err) = char {
+                    on_escape_error(range, err);
+                }
+            })
+        }
+        Mode::RawByteStr => {
+            unescape_raw_str_or_byte_str(literal_text, Mode::RawByteStr, &mut |range, char| {
+                if let Err(err) = char {
+                    on_escape_error(range, err);
+                }
+            })
+        }
     }
 }
 
