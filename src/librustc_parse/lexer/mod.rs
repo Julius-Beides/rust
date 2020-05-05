@@ -351,7 +351,8 @@ impl<'a> StringReader<'a> {
                 let content_start = start + BytePos(2);
                 let content_end = suffix_start - BytePos(1);
                 let lit = self.str_from_to(content_start, content_end);
-                self.validate_literal_escape(Mode::Byte, lit, span);
+                let span_with_quotes = self.mk_sp(content_start - BytePos(1), content_end + BytePos(1));
+                self.validate_literal_escape(Mode::Byte, lit, span_with_quotes);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::Byte, id)
             }
@@ -379,7 +380,8 @@ impl<'a> StringReader<'a> {
                 let content_start = start + BytePos(2);
                 let content_end = suffix_start - BytePos(1);
                 let lit = self.str_from_to(content_start, content_end);
-                self.validate_literal_escape(Mode::ByteStr, lit, span);
+                let span_with_quotes = self.mk_sp(content_start - BytePos(1), content_end + BytePos(1));
+                self.validate_literal_escape(Mode::ByteStr, lit, span_with_quotes);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::ByteStr, id)
             }
@@ -391,8 +393,9 @@ impl<'a> StringReader<'a> {
                 let content_start = start + BytePos(2 + n);
                 let content_end = suffix_start - BytePos(1 + n);
                 let lit = self.str_from_to(content_start, content_end);
-                // TODO this did report a to short span previously
-                self.validate_literal_escape(Mode::RawStr, lit, span);
+                //Note: The span doesn't include the `#`
+                let span_with_quotes = self.mk_sp(content_start - BytePos(1), content_end + BytePos(1));
+                self.validate_literal_escape(Mode::RawStr, lit, span_with_quotes);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::StrRaw(n_hashes), id)
             }
@@ -404,8 +407,9 @@ impl<'a> StringReader<'a> {
                 let content_start = start + BytePos(3 + n);
                 let content_end = suffix_start - BytePos(1 + n);
                 let lit = self.str_from_to(content_start, content_end);
-                // TODO this did report a to short span previously
-                self.validate_literal_escape(Mode::RawByteStr, lit, span);
+                //Note: The span doesn't include the `#`
+                let span_with_quotes = self.mk_sp(content_start - BytePos(1), content_end + BytePos(1));
+                self.validate_literal_escape(Mode::RawByteStr, lit, span_with_quotes);
                 let id = self.symbol_from_to(content_start, content_end);
                 (token::ByteStrRaw(n_hashes), id)
             }
@@ -568,15 +572,8 @@ impl<'a> StringReader<'a> {
         .raise();
     }
     
-    
-    
-    
-    
-    
-    
-    
     fn validate_literal_escape(&self, mode: Mode, lit_content: &str, span_with_quotes: Span) {
-        unescape::unescape(lit_content, mode, &mut |range, err| {
+        unescape::check_escape(lit_content, mode, &mut |range, err| {
             // Called for every escape error in a literal.
             emit_unescape_error(
                 &self.sess.span_diagnostic,

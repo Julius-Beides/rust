@@ -58,6 +58,47 @@ pub enum EscapeError {
     NonAsciiCharInByteString,
 }
 
+/// Takes a contents of a literal (without quotes) and
+/// invokes the provided callback when an error occurred.
+pub fn check_escape<F>(literal_text: &str, mode: Mode, on_escape_error: &mut F)
+    where
+        F: FnMut(Range<usize>, EscapeError)
+{
+    match mode {
+        Mode::Char | Mode::Byte => {
+            let mut chars = literal_text.chars();
+            if let Err(err) = unescape_char_or_byte(&mut chars, mode) {
+                // The Chars iterator advanced forward.
+                on_escape_error(0..(literal_text.len() - chars.as_str().len()), err);
+            }
+        }
+        Mode::Str | Mode::ByteStr => {
+            unescape_str_or_byte_str(literal_text, mode, &mut |range, char| {
+                if let Err(err) = char {
+                    on_escape_error(range, err);
+                }
+            })
+        },
+        Mode::RawStr | Mode::RawByteStr=> {
+            unescape_raw_str_or_byte_str(literal_text, mode, &mut |range, char| {
+                if let Err(err) = char {
+                    on_escape_error(range, err);
+                }
+            })
+        }
+    }
+}
+
+/// Takes a contents of a byte, byte string or raw byte string (without quotes)
+/// and produces a sequence of bytes or errors.
+/// Values are returned through invoking of the provided callback.
+/*pub fn unescape_byte_literal(literal_text: &str, mode: Mode, callback: &mut F)
+where
+    F: FnMut(Range<usize>, Result<u8, EscapeError>),
+{
+
+}*/
+
 /// Takes a contents of a char literal (without quotes), and returns an
 /// unescaped char or an error
 pub fn unescape_char(literal_text: &str) -> Result<char, (usize, EscapeError)> {
@@ -80,7 +121,6 @@ pub fn unescape_byte(literal_text: &str) -> Result<u8, (usize, EscapeError)> {
 /// Values are returned through invoking of the provided callback.
 pub fn unescape_str<F>(literal_text: &str, callback: &mut F)
 where
-    // Nobody uses the Ok(char) part
     F: FnMut(Range<usize>, Result<char, EscapeError>),
 {
     unescape_str_or_byte_str(literal_text, Mode::Str, callback)
@@ -91,7 +131,7 @@ where
 /// Values are returned through invoking of the provided callback.
 pub fn unescape_byte_str<F>(literal_text: &str, callback: &mut F)
 where
-    // Nobody uses the Ok(u8) part
+    // TODO the Ok(u8) part is only used in the AST
     F: FnMut(Range<usize>, Result<u8, EscapeError>),
 {
     unescape_str_or_byte_str(literal_text, Mode::ByteStr, &mut |range, char| {
@@ -132,7 +172,11 @@ pub enum Mode {
     Str,
     Byte,
     ByteStr,
+    /// NOTE: Raw strings do not perform any explicit character escaping, here we
+    /// only translate CRLF to LF and produce errors on bare CR.
     RawStr,
+    /// NOTE: Raw strings do not perform any explicit character escaping, here we
+    /// only translate CRLF to LF and produce errors on bare CR.
     RawByteStr,
 }
 
@@ -152,58 +196,6 @@ impl Mode {
         match self {
             Mode::Byte | Mode::ByteStr | Mode::RawByteStr => true,
             Mode::Char | Mode::Str | Mode::RawStr => false,
-        }
-    }
-}
-
-/// Unify all the unescape methods.
-pub fn unescape<F>(literal_text: &str, mode: Mode, on_escape_error: &mut F)
-where
-    F: FnMut(Range<usize>, EscapeError)
-{
-    let mut chars = literal_text.chars();
-    //TODO unify even more
-    match mode {
-        Mode::Char => if let Err((range, err)) =
-                unescape_char_or_byte(&mut chars, Mode::Char)
-                .map_err(|err| (literal_text.len() - chars.as_str().len(), err)) {
-            on_escape_error(0..range, err);
-        }
-        Mode::Str => {
-            unescape_str_or_byte_str(literal_text, Mode::Str, &mut |range, char| {
-                if let Err(err) = char {
-                    on_escape_error(range, err);
-                }
-            })
-        },
-        Mode::Byte => {
-            let res = unescape_char_or_byte(&mut chars, Mode::Byte)
-                .map(byte_from_char)
-                .map_err(|err| (literal_text.len() - chars.as_str().len(), err));
-            if let Err((range, err)) = res {
-                on_escape_error(0..range, err);
-            }
-        },
-        Mode::ByteStr => {
-            unescape_str_or_byte_str(literal_text, Mode::ByteStr, &mut |range, char| {
-                if let Err(err) = char {
-                    on_escape_error(range, err);
-                }
-            })
-        },
-        Mode::RawStr => {
-            unescape_raw_str_or_byte_str(literal_text, Mode::RawStr, &mut |range, char| {
-                if let Err(err) = char {
-                    on_escape_error(range, err);
-                }
-            })
-        }
-        Mode::RawByteStr => {
-            unescape_raw_str_or_byte_str(literal_text, Mode::RawByteStr, &mut |range, char| {
-                if let Err(err) = char {
-                    on_escape_error(range, err);
-                }
-            })
         }
     }
 }
