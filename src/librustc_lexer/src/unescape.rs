@@ -58,32 +58,28 @@ pub enum EscapeError {
     NonAsciiCharInByteString,
 }
 
-/// Takes a contents of a literal (without quotes) and
-/// invokes the provided callback when an error occurred.
-pub fn check_escape<F>(literal_text: &str, mode: Mode, on_escape_error: &mut F)
-    where
-        F: FnMut(Range<usize>, EscapeError)
+/// Takes a contents of a literal (without quotes) and produces a
+/// sequence of escaped characters or errors.
+/// Values are returned through invoking of the provided callback.
+pub fn unescape_literal<F>(literal_text: &str, mode: Mode, callback: &mut F)
+where
+    F: FnMut(Range<usize>, Result<char, EscapeError>),
 {
     match mode {
         Mode::Char | Mode::Byte => {
             let mut chars = literal_text.chars();
-            if let Err(err) = unescape_char_or_byte(&mut chars, mode) {
-                // The Chars iterator advanced forward.
-                on_escape_error(0..(literal_text.len() - chars.as_str().len()), err);
-            }
+            let result = unescape_char_or_byte(&mut chars, mode);
+            // The Chars iterator moved forward.
+            callback(0..(literal_text.len() - chars.as_str().len()), result);
         }
         Mode::Str | Mode::ByteStr => {
-            unescape_str_or_byte_str(literal_text, mode, &mut |range, char| {
-                if let Err(err) = char {
-                    on_escape_error(range, err);
-                }
+            unescape_str_or_byte_str(literal_text, mode, &mut |range, result| {
+                callback(range, result);
             })
         },
         Mode::RawStr | Mode::RawByteStr=> {
-            unescape_raw_str_or_byte_str(literal_text, mode, &mut |range, char| {
-                if let Err(err) = char {
-                    on_escape_error(range, err);
-                }
+            unescape_raw_str_or_byte_str(literal_text, mode, &mut |range, result| {
+                callback(range, result);
             })
         }
     }
@@ -92,11 +88,14 @@ pub fn check_escape<F>(literal_text: &str, mode: Mode, on_escape_error: &mut F)
 /// Takes a contents of a byte, byte string or raw byte string (without quotes)
 /// and produces a sequence of bytes or errors.
 /// Values are returned through invoking of the provided callback.
-/*pub fn unescape_byte_literal(literal_text: &str, mode: Mode, callback: &mut F)
+// TODO use this in AST, then clean up the separate unescape functins.
+/*pub fn unescape_byte_literal<F>(literal_text: &str, mode: Mode, callback: &mut F)
 where
     F: FnMut(Range<usize>, Result<u8, EscapeError>),
 {
-
+    unescape_literal(literal_text, mode, &mut |range, result| {
+        callback(range, result.map(byte_from_char));
+    })
 }*/
 
 /// Takes a contents of a char literal (without quotes), and returns an
