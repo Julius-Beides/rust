@@ -1455,6 +1455,7 @@ impl fmt::Display for MacroRulesNormalizedIdent {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Symbol(SymbolIndex);
 
+//FIXME Does anyone rely on the fact that Ord is in the oder of interning?
 rustc_index::newtype_index! {
     pub struct SymbolIndex { .. }
 }
@@ -1462,19 +1463,44 @@ rustc_index::newtype_index! {
 impl Symbol {
     const fn new(n: u32) -> Self {
         Symbol(SymbolIndex::from_u32(n))
+        //Symbol { interned_or_inlined: n.try_into().unwrap() }
     }
 
     /// Maps a string to its interned representation.
     pub fn intern(string: &str) -> Self {
-        with_interner(|interner| interner.intern(string))
+        match huffman_encoding(string) {
+            Some(encoded) => {
+                debug_assert_eq!(encoded >> 31, 0, "Only lower 31bit can be used");
+                debug_assert!({
+                    let (bytes, len) = decode(encoded);
+                    Ok(string) == str::from_utf8(&bytes[0..len])
+                });
+                Self::new(encoded as u32)
+            },
+            None => {
+                let sym = with_interner(|interner| interner.intern(string));
+                // Set the most significant bit to 1.
+                Symbol::new(sym.as_u32() | 1 << MAX_BITS)
+                //FIXME The newtype_index makes this complicated.
+                // This probably has to many indirections and tests.
+            },
+        }
     }
 
     /// Convert to a `SymbolStr`. This is a slowish operation because it
     /// requires locking the symbol interner.
     pub fn as_str(self) -> SymbolStr {
-        with_interner(|interner| unsafe {
-            SymbolStr { string: std::mem::transmute::<&str, &str>(interner.get(self)) }
-        })
+        // If the highest bit is set, it's not inline. //TODO invert that.
+        if self.0.as_u32() >> MAX_BITS == 1 {
+            with_interner(|interner| unsafe {
+                //SymbolStr { string: std::mem::transmute::<&str, &str>(interner.get(self)) }
+                let sym = Symbol::new(self.as_u32() & ((1<<MAX_BITS) -1));
+                SymbolStr::Interned { string: std::mem::transmute::<&str, &str>(interner.get(sym)) }
+            })
+        } else {
+            let (bytes, len) = decode(self.0.as_u32() as u64);
+            SymbolStr::Inline { bytes, len }
+        }
     }
 
     pub fn as_u32(self) -> u32 {
@@ -1534,6 +1560,213 @@ impl<CTX> ToStableHashKey<CTX> for Symbol {
         self.as_str()
     }
 }
+
+const MAX_BITS: usize = 31;
+const MAX_COMPRESSIBLE_LEN: usize = MAX_BITS / 4 /*encoding len of 'e'*/;
+
+fn huffman_encoding(text: &str) -> Option<u64> {
+    debug_assert!(MAX_BITS <= 64, "Only encoding up to 64bit is supported");
+    let mut accumulator = 0u64;
+    let mut used_bits = 0usize;
+
+    // Early return for performance.
+    if text.len() > MAX_COMPRESSIBLE_LEN {
+        // Even if all chars have use the smallest encoding length, it can't fit.
+        return None;
+    }
+
+    // I'll use a huffman encoding, but capped to 10bit max encoding length,
+    // so biases in the statistic and pathological cases can't have to much impact.
+    // It also makes reasoning about the worst-case easier: In 32bit you can always
+    // fit at least 3 chars.
+    for &byte in text.as_bytes() {
+        let (length, encoded) = match byte {
+            b'e' => (4, 0b1110),
+            b't' => (4, 0b1011),
+            b's' => (4, 0b1000),
+            b'r' => (4, 0b0101),
+            b'i' => (4, 0b0100),
+            b'a' => (5, 0b11111),
+            b'n' => (5, 0b11110),
+            b'l' => (5, 0b11001),
+            b'o' => (5, 0b11000),
+            b'_' => (5, 0b10101),
+            b'c' => (5, 0b10011),
+            b'd' => (5, 0b10010),
+            b'p' => (5, 0b01111),
+            b'f' => (5, 0b01101),
+            b'u' => (5, 0b01100),
+            b'm' => (6, 0b110101),
+            b'b' => (6, 0b011100),
+            b'y' => (7, 0b1101111),
+            b'g' => (7, 0b1101110),
+            b'h' => (7, 0b1101001),
+            b'x' => (7, 0b1010011),
+            b'v' => (7, 0b0111011),
+            b'S' => (8, 0b11011011),
+            b'k' => (8, 0b11011010),
+            b'w' => (8, 0b11010000),
+            b'T' => (8, 0b10100100),
+            b'I' => (8, 0b10100010),
+            b'C' => (8, 0b10100001),
+            b'E' => (8, 0b10100000),
+            b'P' => (8, 0b01110100),
+            b'D' => (9, 0b110110011),
+            b'R' => (9, 0b110110010),
+            b'A' => (9, 0b110110001),
+            b'O' => (9, 0b110110000),
+            b'N' => (9, 0b110100011),
+            b'L' => (9, 0b110100010),
+            b'M' => (9, 0b101001011),
+            b'F' => (9, 0b101001010),
+            b'B' => (9, 0b101000111),
+            b'K' => (9, 0b101000110),
+            b'V' => (9, 0b011101011),
+            b'z' => (9, 0b011101010),
+            // The null byte is used as a string end marker when decoding, so it
+            // must not appear in the input string.
+            b'\0' => return None,
+            // Everything else is encoded as `00xxxxxxxx`
+            other => (10, other as u16),
+        };
+
+        // Insert the encoding in the lower bits of the accumulator.
+        // When the accumulator becomes to small, it just overflows and looses
+        // the first encoded chars. I ignore that here.
+        accumulator = (accumulator << length) | encoded as u64;
+        used_bits += length;
+    }
+
+    if used_bits <= MAX_BITS {
+        // To make decoding easier, the output begins at the highest bit.
+        // Eg. "len" is encoded as `11001111011110` and is padded to `1100111101111000000000000000000`.
+        // This implicitly inserts '\0' terminators at the end.
+        let padded = accumulator << (MAX_BITS - used_bits);
+        // Compression successful.
+        Some(padded)
+    } else {
+        // The string could not be compressed to MAX_BITS.
+        None
+    }
+}
+
+fn decode(encoded: u64) -> ([u8; MAX_COMPRESSIBLE_LEN], usize) {
+    // We operate at the highest bits
+    let mut accumulator = encoded << (64 - MAX_BITS);
+    let mut decoded_bytes = [0u8; MAX_COMPRESSIBLE_LEN];
+
+    for i in 0..MAX_COMPRESSIBLE_LEN {
+        if accumulator >> 62 == 0 {
+            // If the highest two bits are 0, we have the "other" encoding.
+            let byte_or_end = accumulator >> (64 - 10);
+
+            if byte_or_end == '\0' as u64 {
+                // Reached the end of the string. Return the decoded bytes and the length.
+                return (decoded_bytes, i);
+            } else {
+                decoded_bytes[i] = byte_or_end as u8;
+                accumulator = accumulator << 10;
+            }
+        } else {
+            const NOPE: u8 = 0;
+
+            let decoded_bits_4 = match accumulator >> (64 - 4) {
+                0b1110 => b'e',
+                0b1011 => b't',
+                0b1000 => b's',
+                0b0101 => b'r',
+                0b0100 => b'i',
+                _ => NOPE,
+            };
+
+            let decoded_bits_5 = match accumulator >> (64 - 5) {
+                0b11111 => b'a',
+                0b11110 => b'n',
+                0b11001 => b'l',
+                0b11000 => b'o',
+                0b10101 => b'_',
+                0b10011 => b'c',
+                0b10010 => b'd',
+                0b01111 => b'p',
+                0b01101 => b'f',
+                0b01100 => b'u',
+                _ => NOPE,
+            };
+
+            let decoded_bits_6 = match accumulator >> (64 - 6) {
+                0b110101 => b'm',
+                0b011100 => b'b',
+                _ => NOPE,
+            };
+
+            let decoded_bits_7 = match accumulator >> (64 - 7) {
+                0b1101111 => b'y',
+                0b1101110 => b'g',
+                0b1101001 => b'h',
+                0b1010011 => b'x',
+                0b0111011 => b'v',
+                _ => NOPE,
+            };
+
+            let decoded_bits_8 = match accumulator >> (64 - 8) {
+                0b11011011 => b'S',
+                0b11011010 => b'k',
+                0b11010000 => b'w',
+                0b10100100 => b'T',
+                0b10100010 => b'I',
+                0b10100001 => b'C',
+                0b10100000 => b'E',
+                0b01110100 => b'P',
+                _ => NOPE,
+            };
+
+            let decoded_bits_9 = match accumulator >> (64 - 9) {
+                0b110110011 => b'D',
+                0b110110010 => b'R',
+                0b110110001 => b'A',
+                0b110110000 => b'O',
+                0b110100011 => b'N',
+                0b110100010 => b'L',
+                0b101001011 => b'M',
+                0b101001010 => b'F',
+                0b101000111 => b'B',
+                0b101000110 => b'K',
+                0b011101011 => b'V',
+                0b011101010 => b'z',
+                _ => NOPE,
+            };
+
+            // We have to find the right encoding length. We try from shortest to longest.
+            let (num_bits, decoded_byte) =
+                if decoded_bits_4 != NOPE {
+                    (4, decoded_bits_4)
+                } else if decoded_bits_5 != NOPE {
+                    (5, decoded_bits_5)
+                } else if decoded_bits_6 != NOPE {
+                    (6, decoded_bits_6)
+                } else if decoded_bits_7 != NOPE {
+                    (7, decoded_bits_7)
+                } else if decoded_bits_8 != NOPE {
+                    (8, decoded_bits_8)
+                } else if decoded_bits_9 != NOPE {
+                    (9, decoded_bits_9)
+                } else {
+                    unreachable!("An encoding must have been found")
+                };
+
+            decoded_bytes[i] = decoded_byte;
+            // next char
+            accumulator = accumulator << num_bits;
+        }
+    }
+
+    unreachable!();
+}
+
+
+
+
+
 
 // The `&'static str`s in this type actually point into the arena.
 //
@@ -1725,15 +1958,18 @@ fn with_interner<T, F: FnOnce(&mut Interner) -> T>(f: F) -> T {
 // FIXME: ensure that the interner outlives any thread which uses `SymbolStr`,
 // by creating a new thread right after constructing the interner.
 #[derive(Clone, Eq, PartialOrd, Ord)]
-pub struct SymbolStr {
-    string: &'static str,
+pub enum SymbolStr {
+    Interned { string: &'static str },
+    Inline { bytes: [u8; MAX_COMPRESSIBLE_LEN], len: usize },
 }
+
+use std::ops::Deref;
 
 // This impl allows a `SymbolStr` to be directly equated with a `String` or
 // `&str`.
 impl<T: std::ops::Deref<Target = str>> std::cmp::PartialEq<T> for SymbolStr {
     fn eq(&self, other: &T) -> bool {
-        self.string == other.deref()
+        self.deref() == other.deref()
     }
 }
 
@@ -1749,26 +1985,29 @@ impl std::ops::Deref for SymbolStr {
     type Target = str;
     #[inline]
     fn deref(&self) -> &str {
-        self.string
+        match self {
+            SymbolStr::Interned { string } => *string,
+            SymbolStr::Inline { bytes, len} => str::from_utf8(&bytes[0..*len]).unwrap(),
+        }
     }
 }
 
 impl fmt::Debug for SymbolStr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self.string, f)
+        fmt::Debug::fmt(self.deref(), f)
     }
 }
 
 impl fmt::Display for SymbolStr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self.string, f)
+        fmt::Display::fmt(self.deref(), f)
     }
 }
 
 impl<CTX> HashStable<CTX> for SymbolStr {
     #[inline]
     fn hash_stable(&self, hcx: &mut CTX, hasher: &mut StableHasher) {
-        self.string.hash_stable(hcx, hasher)
+        self.deref().hash_stable(hcx, hasher)
     }
 }
 
